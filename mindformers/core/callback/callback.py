@@ -680,6 +680,7 @@ class TrainingStateMonitor(Callback):
             for param in network.trainable_params():
                 logger.info(param.name)
             self.run_context.request_stop()
+        self._clear_dump_path()
 
     def on_train_step_end(self, run_context):
         """
@@ -689,7 +690,7 @@ class TrainingStateMonitor(Callback):
             run_context (RunContext): Context of the process running.
         """
         if self.print_struct:
-            self._clear_dump_path()
+            # self._clear_dump_path()
             return
         step_seconds = (time.time() - self.step_time) * 1000
         parallel_mode = get_auto_parallel_context("parallel_mode")
@@ -889,7 +890,7 @@ class TrainingStateMonitor(Callback):
             for f in search_path:
                 tag, _ = os.path.splitext(os.path.basename(f))
                 step_ids.append(int(tag.split('_')[id_pos]))
-                os.remove(f)
+                # os.remove(f)
             step_ids.sort()
             return step_ids
 
@@ -947,7 +948,7 @@ class TrainingStateMonitor(Callback):
                 device_local_loss = np.mean(get_device_local_loss().asnumpy())
                 self._output(f'device_accum_local_loss', device_local_loss, self.dump_step,
                              self.device_local_loss_format)
-            self._clear_dump_path()
+            # self._clear_dump_path()
             self.dump_step += self.step_interval
 
     def _dump_local_loss(self, local_losses):
@@ -2668,3 +2669,279 @@ class StressTestModelMonitor(Callback):
 
         # If no such line, training hasn't started
         return "Training has not started yet."
+
+class DumpDataParser:
+    def __init__(self, dump_path):
+        self.dump_path = dump_path
+        self.last_finish_idx = -1
+        logger.info(f"Dump data parser created for path {dump_path}")
+
+    def __call__(self):
+        file_list = os.listdir(self.dump_path)
+        logger.info(f"Stress test dump file list: {file_list}")
+        if not file_list:
+            return {}
+
+        parsers = {}
+        if is_version_ge(ms.__version__, "2.5.0"):
+            step_parser = self._get_step_parser(r"finish_step_.+_(\d+)\.npy", 1)
+            parsers["local_loss"] = self._get_parser(r"local_loss_\w+\d+_(\d+)\.npy", 1)
+            parsers["device_local_norm"] = self._get_parser(
+                r"device_local_norm_\w+\d+_(\d+)\.npy", 1
+            )
+        else:
+            step_parser = self._get_step_parser(r"finish_step_.+_(\d+)\.npy", 1)
+            parsers["local_loss"] = self._get_parser(r"(\d+)_local_loss\.npy", 1)
+            parsers["device_local_norm"] = self._get_parser(
+                r"(\d+)_device_local_norm\.npy", 1
+            )
+
+        finish_idx = step_parser(file_list)
+        if not finish_idx:
+            return {}
+        idx_map = {}
+        last_idx = self.last_finish_idx
+        for i, v in enumerate(finish_idx):
+            for j in range(last_idx + 1, v):
+                idx_map[j] = i
+            last_idx = v
+        ret = {
+            key: parser(file_list, idx_map, finish_idx)
+            for key, parser in parsers.items()
+        }
+
+        self.last_finish_idx = finish_idx[-1]
+        return ret
+
+    def _get_parser(self, pattern, idx_group):
+        pattern = re.compile(pattern)
+
+        def get_single_data(file_list, idx_map, step_size):
+            file_matches = list(
+                filter(
+                    lambda x: x and int(x.group(idx_group)) in idx_map,
+                    map(lambda x: re.match(pattern, x), file_list),
+                )
+            )
+
+            file_paths = [x.group(0) for x in file_matches if x]
+            file_idx = [int(x.group(idx_group)) for x in file_matches if x]
+            ret = [None] * len(step_size)
+            for idx, path in zip(file_idx, file_paths):
+                if idx in idx_map:
+                    data = np.load(
+                        os.path.join(self.dump_path, path), allow_pickle=False
+                    )
+                    if ret[idx_map[idx]] is None:
+                        ret[idx_map[idx]] = data
+                    else:
+                        raise ValueError(
+                            f"Duplicate dump file for step {idx}, please check."
+                        )
+            return ret
+
+        return get_single_data
+
+    def _get_step_parser(self, pattern, idx_group):
+        pattern = re.compile(pattern)
+
+        def step_parser(file_list):
+            finish_files = filter(
+                lambda x: x, map(lambda x: re.match(pattern, x), file_list)
+            )
+
+            finish_idx = sorted(
+                filter(
+                    lambda x: x > self.last_finish_idx,
+                    map(lambda x: int(x.group(idx_group)), finish_files),
+                )
+            )
+            return finish_idx
+
+        return step_parser
+
+
+from mindspore.train.serialization import _get_cur_rank_dp
+from mindspore._c_expression import enable_stress_test, disable_stress_test
+
+
+@MindFormerRegister.register(MindFormerModuleType.CALLBACK)
+class StressTest(Callback):
+    def __init__(self, data_parallel, stress_test_steps):
+        super().__init__()
+        self.data_parallel = data_parallel
+        self.stress_test_steps = self._parse_stress_test_steps(stress_test_steps)
+
+        self.dump_path = None
+        self.dump_data_parser = None
+        if get_auto_parallel_context("dump_local_norm_path"):
+            self.dump_path = os.path.join(
+                get_auto_parallel_context("dump_local_norm_path"),
+                f"rank_{get_real_rank()}",
+            )
+            self.dump_data_parser = DumpDataParser(self.dump_path)
+
+        self._last_step = 0
+
+    def _parse_stress_test_steps(self, stress_test_steps):
+        ret = []
+        for s in stress_test_steps:
+            if isinstance(s, int) and s > 0:
+                ret.append(s)
+            elif isinstance(s, str):
+                s = s.strip().split("-")
+                if len(s) == 2 and s[0].isdigit() and s[1].isdigit():
+                    start, end = int(s[0]), int(s[1])
+                    if start > 0 and end >= start:
+                        ret.extend(list(range(start, end + 1)))
+                        continue
+                raise ValueError(
+                    f"Invalid stress test step {s}, should be range like '10-20'."
+                )
+            else:
+                raise ValueError(
+                    f"Invalid stress test step {s}, should be positive integer or range like '10-20'."
+                )
+        return set(ret)
+
+
+
+    def _get_cur_rank_dp(self, train_network):
+        param_layout_dict = train_network.parameter_layout_dict
+        ret = (
+            _get_cur_rank_dp(param_layout_dict)
+            if param_layout_dict
+            else _get_cur_rank_dp(train_network)
+        )
+        return ret
+
+    def on_train_begin(self, run_context):
+        logger.info("Stress Test CB: on_train_begin")
+        cb_params = run_context.original_args()
+        self._last_step = cb_params.cur_step_num
+
+        mode = cb_params.get("mode")
+        device_number = cb_params.get("device_number")
+        parallel_mode = cb_params.get("parallel_mode")
+        dataset_sink_mode = cb_params.get("dataset_sink_mode")
+        train_network = cb_params.get("train_network")
+
+        logger.info("Enable stress test.")
+        enable_stress_test(list(self.stress_test_steps), self.data_parallel)
+
+    def on_train_step_end(self, run_context):
+        cb_params = run_context.original_args()
+        cur_step = cb_params.cur_step_num
+
+        logger.info(f"cur step: {cur_step}, last step: {self._last_step}")
+
+        self.cur_rank_dp = self._get_cur_rank_dp(cb_params.train_network)
+
+        group = "-".join(map(str, self.cur_rank_dp))
+        create_group(group, list(self.cur_rank_dp))
+
+        compare_data, test_steps = self._get_compare_data(cur_step)
+
+        if compare_data:
+            barrier(group=group)
+            gather_local_loss = all_gather_into_tensor(
+                compare_data["local_loss"].unsqueeze(0), group=group
+            )
+            gather_local_norm = all_gather_into_tensor(
+                compare_data["device_local_norm"].unsqueeze(0), group=group
+            )
+            loss_diff_step_and_rank = self._compare_data(
+                compare_data["local_loss"],
+                gather_local_loss,
+                self.cur_rank_dp,
+                get_rank(),
+                test_steps,
+            )
+            device_norm_diff_step_and_rank = self._compare_data(
+                compare_data["device_local_norm"],
+                gather_local_norm,
+                self.cur_rank_dp,
+                get_rank(),
+                test_steps,
+            )
+            if loss_diff_step_and_rank:
+                for step, rank, local_data, gather_data in loss_diff_step_and_rank:
+                    logger.error(
+                        f"Stress test failed at step {step}, loss mismatch with rank {rank}. local loss: {local_data}, rank {rank} loss: {gather_data}"
+                    )
+            if device_norm_diff_step_and_rank:
+                for step, rank, local_data, gather_data in device_norm_diff_step_and_rank:
+                    logger.error(
+                        f"Stress test failed at step {step}, device local norm mismatch with rank {rank}. local norm: {local_data}, rank {rank} norm: {gather_data}"
+                    )
+            if not loss_diff_step_and_rank and not device_norm_diff_step_and_rank:
+                logger.info(
+                    f"Stress test passed at step {test_steps}, all reduce results are consistent."
+                )
+
+        self._last_step = cur_step
+
+    def _compare_data(self, local_data, gather_data, cur_rank_dp, cur_rank, test_steps):
+        rank_size = len(cur_rank_dp)
+        local_data = local_data.asnumpy()
+        gather_data = gather_data[0].asnumpy()
+
+        ret = []
+
+        for i in range(rank_size):
+            if cur_rank == cur_rank_dp[i]:
+                continue
+            eq = local_data == gather_data[i]
+            eq = eq.all(axis=tuple(range(1, eq.ndim)))
+            for j, e in enumerate(eq):
+                if not e:
+                    ret.append((test_steps[j], cur_rank_dp[i], local_data[j], gather_data[i][j]))
+        return ret
+
+    def _get_compare_data(self, cur_step):
+        if self._last_step == cur_step:
+            return None, []
+
+        test_steps = [
+            s for s in self.stress_test_steps if self._last_step < s <= cur_step
+        ]
+
+        if not test_steps or not self.dump_data_parser:
+            return None, test_steps
+
+        dump_data = self.dump_data_parser()
+        if not dump_data:
+            logger.error("No dump data found.")
+            return None, test_steps
+
+        compare_loss = []
+        try:
+            compare_loss = [
+                dump_data.get("local_loss", [])[i - self._last_step - 1]
+                for i in test_steps
+            ]
+            if any(l is None for l in compare_loss):
+                logger.error("Incomplete local loss data found.")
+                compare_loss = []
+        except IndexError:
+            logger.error("Not enough local loss data found.")
+            return None, test_steps
+
+        compare_norm = []
+        try:
+            compare_norm = [
+                dump_data.get("device_local_norm", [])[i - self._last_step - 1]
+                for i in test_steps
+            ]
+            if any(n is None for n in compare_norm):
+                logger.error("Incomplete device local norm data found.")
+                compare_norm = []
+        except IndexError:
+            logger.error("Not enough device local norm data found.")
+            return None, test_steps
+
+        compare_loss, compare_norm = ms.Tensor(compare_loss), ms.Tensor(compare_norm)
+        return {
+            "local_loss": compare_loss,
+            "device_local_norm": compare_norm,
+        }, test_steps

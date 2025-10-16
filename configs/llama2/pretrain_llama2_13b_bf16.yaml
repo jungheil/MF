@@ -6,6 +6,7 @@ auto_trans_ckpt: False  # If true, auto transform load_checkpoint to load in dis
 only_save_strategy: False
 resume_training: False
 run_mode: 'train'
+train_precision_sync: True
 
 # trainer config
 trainer:
@@ -20,7 +21,7 @@ runner_config:
   epochs: 2
   batch_size: 4
   sink_mode: True
-  sink_size: 1
+  sink_size: 8
 
 # optimizer
 optimizer:
@@ -42,7 +43,7 @@ train_dataset: &train_dataset
   data_loader:
     type: MindDataset
     dataset_dir: ""
-    shuffle: True
+    shuffle: False
   input_columns: ["input_ids"]  # "input_ids", "labels" , labels are used in instruction finetune.
   num_parallel_workers: 8
   python_multiprocessing: False
@@ -80,15 +81,15 @@ parallel:
   enable_alltoall: False
   full_batch: True
   search_mode: "sharding_propagation"
-  enable_parallel_optimizer: True
+  enable_parallel_optimizer: False
   strategy_ckpt_save_file: "./ckpt_strategy.ckpt"
   parallel_optimizer_config:
     gradient_accumulation_shard: False
     parallel_optimizer_threshold: 64
 # default parallel of device num = 16 for Atlas 800T A2
 parallel_config:
-  data_parallel: 8
-  model_parallel: 1
+  data_parallel: 2
+  model_parallel: 2
   pipeline_stage: 1
   use_seq_parallel: False
   micro_batch_num: 1
@@ -113,6 +114,15 @@ callbacks:
     save_checkpoint_steps: 100
     integrated_save: False
     async_save: False
+  - type: StressTest
+    data_parallel: 2
+    stress_test_steps: [4, 5, 6, 12, 13, 14, 20, 21, 22]
+
+monitor_config:
+  monitor_on: True
+  dump_path: '/mnt/disk1/lirongxi/project/mindformers/stress_dump'
+  local_loss_format: "log"
+  device_local_norm_format: "log"
 
 # mindspore context init config
 context:
@@ -134,7 +144,7 @@ model:
     batch_size: 1 # add for increase predict
     seq_length: 4096
     hidden_size: 5120
-    num_layers: 40
+    num_layers: 8
     num_heads: 40
     vocab_size: 32000
     multiple_of: 256
