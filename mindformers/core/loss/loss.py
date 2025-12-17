@@ -467,7 +467,9 @@ class CrossEntropyLoss(nn.Cell):
             local_loss = self.div2(local_numerator, local_denominator)
             if self.monitor_local_loss:
                 if self.dump_local_loss:
-                    self.dump(self.local_loss_filename, local_loss)
+                    #TODO 为了简化测试修改，之后要改回来
+                    # self.dump(self.local_loss_filename, local_loss)
+                    self.dump(self.local_loss_filename, loss_reduce)
                 else:
                     print("local loss: ", local_loss)
             if self.monitor_device_local_loss:

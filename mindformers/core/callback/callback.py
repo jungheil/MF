@@ -942,8 +942,9 @@ class TrainingStateMonitor(Callback):
                     local_losses.append(data)
                 elif prefix == 'local_norm' and self._check_param_name(param_name):
                     self._output(f'local_norm/{param_name}', data, self.dump_step, self.local_norm_format)
-            if local_losses and self.local_loss_format:
-                self._dump_local_loss(local_losses)
+            #TODO 这里为了方便测试，之后要加回来
+            # if local_losses and self.local_loss_format:
+            #     self._dump_local_loss(local_losses)
             if self.device_local_loss_format:
                 device_local_loss = np.mean(get_device_local_loss().asnumpy())
                 self._output(f'device_accum_local_loss', device_local_loss, self.dump_step,
@@ -997,9 +998,12 @@ class TrainingStateMonitor(Callback):
     def _clear_dump_path(self):
         if not self.dump_path:
             return
-        file_list = os.listdir(self.dump_path)
-        for f in file_list:
-            os.remove(os.path.join(self.dump_path, f))
+        try:
+            file_list = os.listdir(self.dump_path)
+            for f in file_list:
+                os.remove(os.path.join(self.dump_path, f))
+        except FileNotFoundError:
+            pass
 
     def _to_tensorboard(self, tag, data, global_step):
         """Write data to tensorboard if possible"""
@@ -2670,278 +2674,929 @@ class StressTestModelMonitor(Callback):
         # If no such line, training hasn't started
         return "Training has not started yet."
 
-class DumpDataParser:
-    def __init__(self, dump_path):
-        self.dump_path = dump_path
-        self.last_finish_idx = -1
-        logger.info(f"Dump data parser created for path {dump_path}")
+# class DumpDataParser:
+#     def __init__(self, dump_path):
+#         self.dump_path = dump_path
+#         self.last_finish_idx = -1
+#         logger.info(f"Dump data parser created for path {dump_path}")
 
-    def __call__(self):
-        file_list = os.listdir(self.dump_path)
-        logger.info(f"Stress test dump file list: {file_list}")
-        if not file_list:
-            return {}
+#     def __call__(self):
+#         file_list = os.listdir(self.dump_path)
+#         logger.info(f"Stress test dump file list: {file_list}")
+#         if not file_list:
+#             return {}
 
-        parsers = {}
-        if is_version_ge(ms.__version__, "2.5.0"):
-            step_parser = self._get_step_parser(r"finish_step_.+_(\d+)\.npy", 1)
-            parsers["local_loss"] = self._get_parser(r"local_loss_\w+\d+_(\d+)\.npy", 1)
-            parsers["device_local_norm"] = self._get_parser(
-                r"device_local_norm_\w+\d+_(\d+)\.npy", 1
-            )
-        else:
-            step_parser = self._get_step_parser(r"finish_step_.+_(\d+)\.npy", 1)
-            parsers["local_loss"] = self._get_parser(r"(\d+)_local_loss\.npy", 1)
-            parsers["device_local_norm"] = self._get_parser(
-                r"(\d+)_device_local_norm\.npy", 1
-            )
+#         parsers = {}
+#         if is_version_ge(ms.__version__, "2.5.0"):
+#             step_parser = self._get_step_parser(r"finish_step_.+_(\d+)\.npy", 1)
+#             parsers["local_loss"] = self._get_parser(r"local_loss_\w+\d+_(\d+)\.npy", 1)
+#             parsers["device_local_norm"] = self._get_parser(
+#                 r"device_local_norm_\w+\d+_(\d+)\.npy", 1
+#             )
+#         else:
+#             step_parser = self._get_step_parser(r"finish_step_.+_(\d+)\.npy", 1)
+#             parsers["local_loss"] = self._get_parser(r"(\d+)_local_loss\.npy", 1)
+#             parsers["device_local_norm"] = self._get_parser(
+#                 r"(\d+)_device_local_norm\.npy", 1
+#             )
 
-        finish_idx = step_parser(file_list)
-        if not finish_idx:
-            return {}
-        idx_map = {}
-        last_idx = self.last_finish_idx
-        for i, v in enumerate(finish_idx):
-            for j in range(last_idx + 1, v):
-                idx_map[j] = i
-            last_idx = v
-        ret = {
-            key: parser(file_list, idx_map, finish_idx)
-            for key, parser in parsers.items()
-        }
+#         finish_idx = step_parser(file_list)
+#         if not finish_idx:
+#             return {}
+#         idx_map = {}
+#         last_idx = self.last_finish_idx
+#         for i, v in enumerate(finish_idx):
+#             for j in range(last_idx + 1, v):
+#                 idx_map[j] = i
+#             last_idx = v
+#         ret = {
+#             key: parser(file_list, idx_map, finish_idx)
+#             for key, parser in parsers.items()
+#         }
 
-        self.last_finish_idx = finish_idx[-1]
-        return ret
+#         self.last_finish_idx = finish_idx[-1]
+#         return ret
 
-    def _get_parser(self, pattern, idx_group):
-        pattern = re.compile(pattern)
+#     def _get_parser(self, pattern, idx_group):
+#         pattern = re.compile(pattern)
 
-        def get_single_data(file_list, idx_map, step_size):
-            file_matches = list(
-                filter(
-                    lambda x: x and int(x.group(idx_group)) in idx_map,
-                    map(lambda x: re.match(pattern, x), file_list),
-                )
-            )
+#         def get_single_data(file_list, idx_map, step_size):
+#             file_matches = list(
+#                 filter(
+#                     lambda x: x and int(x.group(idx_group)) in idx_map,
+#                     map(lambda x: re.match(pattern, x), file_list),
+#                 )
+#             )
 
-            file_paths = [x.group(0) for x in file_matches if x]
-            file_idx = [int(x.group(idx_group)) for x in file_matches if x]
-            ret = [None] * len(step_size)
-            for idx, path in zip(file_idx, file_paths):
-                if idx in idx_map:
-                    data = np.load(
-                        os.path.join(self.dump_path, path), allow_pickle=False
-                    )
-                    if ret[idx_map[idx]] is None:
-                        ret[idx_map[idx]] = data
-                    else:
-                        raise ValueError(
-                            f"Duplicate dump file for step {idx}, please check."
-                        )
-            return ret
+#             file_paths = [x.group(0) for x in file_matches if x]
+#             file_idx = [int(x.group(idx_group)) for x in file_matches if x]
+#             ret = [None] * len(step_size)
+#             for idx, path in zip(file_idx, file_paths):
+#                 if idx in idx_map:
+#                     data = np.load(
+#                         os.path.join(self.dump_path, path), allow_pickle=False
+#                     )
+#                     if ret[idx_map[idx]] is None:
+#                         ret[idx_map[idx]] = data
+#                     else:
+#                         # raise ValueError(
+#                         #     f"Duplicate dump file for step {idx}, please check."
+#                         # )
+#                         ret[idx_map[idx]] += data
+#             return ret
 
-        return get_single_data
+#         return get_single_data
 
-    def _get_step_parser(self, pattern, idx_group):
-        pattern = re.compile(pattern)
+#     def _get_step_parser(self, pattern, idx_group):
+#         pattern = re.compile(pattern)
 
-        def step_parser(file_list):
-            finish_files = filter(
-                lambda x: x, map(lambda x: re.match(pattern, x), file_list)
-            )
+#         def step_parser(file_list):
+#             finish_files = filter(
+#                 lambda x: x, map(lambda x: re.match(pattern, x), file_list)
+#             )
 
-            finish_idx = sorted(
-                filter(
-                    lambda x: x > self.last_finish_idx,
-                    map(lambda x: int(x.group(idx_group)), finish_files),
-                )
-            )
-            return finish_idx
+#             finish_idx = sorted(
+#                 filter(
+#                     lambda x: x > self.last_finish_idx,
+#                     map(lambda x: int(x.group(idx_group)), finish_files),
+#                 )
+#             )
+#             return finish_idx
 
-        return step_parser
-
-
-from mindspore.train.serialization import _get_cur_rank_dp
-from mindspore._c_expression import enable_stress_test, disable_stress_test
+#         return step_parser
 
 
-@MindFormerRegister.register(MindFormerModuleType.CALLBACK)
-class StressTest(Callback):
-    def __init__(self, data_parallel, stress_test_steps):
-        super().__init__()
-        self.data_parallel = data_parallel
-        self.stress_test_steps = self._parse_stress_test_steps(stress_test_steps)
-
-        self.dump_path = None
-        self.dump_data_parser = None
-        if get_auto_parallel_context("dump_local_norm_path"):
-            self.dump_path = os.path.join(
-                get_auto_parallel_context("dump_local_norm_path"),
-                f"rank_{get_real_rank()}",
-            )
-            self.dump_data_parser = DumpDataParser(self.dump_path)
-
-        self._last_step = 0
-
-    def _parse_stress_test_steps(self, stress_test_steps):
-        ret = []
-        for s in stress_test_steps:
-            if isinstance(s, int) and s > 0:
-                ret.append(s)
-            elif isinstance(s, str):
-                s = s.strip().split("-")
-                if len(s) == 2 and s[0].isdigit() and s[1].isdigit():
-                    start, end = int(s[0]), int(s[1])
-                    if start > 0 and end >= start:
-                        ret.extend(list(range(start, end + 1)))
-                        continue
-                raise ValueError(
-                    f"Invalid stress test step {s}, should be range like '10-20'."
-                )
-            else:
-                raise ValueError(
-                    f"Invalid stress test step {s}, should be positive integer or range like '10-20'."
-                )
-        return set(ret)
+# from mindspore.train.serialization import _get_cur_rank_dp
+# from mindspore._c_expression import (
+#     enable_stress_test,
+#     disable_stress_test,
+#     get_norm_print,
+# )
+# from functools import reduce
 
 
+# # @MindFormerRegister.register(MindFormerModuleType.CALLBACK)
+# class StressTest(Callback):
+#     def __init__(self, data_parallel, stress_test_steps, tensor_dump_path=None):
+#         super().__init__()
+#         # 能不能自动获取
 
-    def _get_cur_rank_dp(self, train_network):
-        param_layout_dict = train_network.parameter_layout_dict
-        ret = (
-            _get_cur_rank_dp(param_layout_dict)
-            if param_layout_dict
-            else _get_cur_rank_dp(train_network)
-        )
-        return ret
+#         self.data_parallel = data_parallel
+#         self.stress_test_steps = self._parse_stress_test_steps(stress_test_steps)
+#         self.tensor_dump_path = tensor_dump_path
 
-    def on_train_begin(self, run_context):
-        logger.info("Stress Test CB: on_train_begin")
-        cb_params = run_context.original_args()
-        self._last_step = cb_params.cur_step_num
+#         self.dump_path = None
+#         self.dump_data_parser = None
+#         if get_auto_parallel_context("dump_local_norm_path"):
+#             self.dump_path = os.path.join(
+#                 get_auto_parallel_context("dump_local_norm_path"),
+#                 f"rank_{get_real_rank()}",
+#             )
+#             self.dump_data_parser = DumpDataParser(self.dump_path)
 
-        mode = cb_params.get("mode")
-        device_number = cb_params.get("device_number")
-        parallel_mode = cb_params.get("parallel_mode")
-        dataset_sink_mode = cb_params.get("dataset_sink_mode")
-        train_network = cb_params.get("train_network")
+#         self._last_step = 0
 
-        logger.info("Enable stress test.")
-        enable_stress_test(list(self.stress_test_steps), self.data_parallel)
+#     def _get_dp_group(self, train_network):
+#         param_layout_dict = train_network.parameter_layout_dict
+#         ret = (
+#             _get_cur_rank_dp(param_layout_dict)
+#             if param_layout_dict
+#             else _get_cur_rank_dp(train_network)
+#         )
+#         return ret
 
-    def on_train_step_end(self, run_context):
-        cb_params = run_context.original_args()
-        cur_step = cb_params.cur_step_num
+#     def _get_pipeline_group(self):
+#         rank = get_rank()
+#         stage_nums = auto_parallel_context().get_pipeline_stages()
+#         device_nums = get_group_size()
+#         per_stage_device_nums = device_nums // stage_nums
+#         local_stage_rank_id = rank % per_stage_device_nums
+#         rank_list = [
+#             local_stage_rank_id + x * per_stage_device_nums
+#             for x in range(0, stage_nums)
+#         ]
+#         return rank_list
 
-        logger.info(f"cur step: {cur_step}, last step: {self._last_step}")
+#     def _get_stage_group(self):
+#         rank = get_rank()
+#         stage_nums = auto_parallel_context().get_pipeline_stages()
+#         device_nums = get_group_size()
+#         per_stage_device_nums = device_nums // stage_nums
+#         stage_idx = rank // per_stage_device_nums
+#         stage_rank = list(
+#             range(
+#                 stage_idx * per_stage_device_nums,
+#                 (stage_idx + 1) * per_stage_device_nums,
+#             )
+#         )
+#         return stage_rank
 
-        self.cur_rank_dp = self._get_cur_rank_dp(cb_params.train_network)
+#     def _get_rank_stage(self):
+#         rank = get_rank()
+#         stage_nums = auto_parallel_context().get_pipeline_stages()
+#         device_nums = get_group_size()
+#         per_stage_device_nums = device_nums // stage_nums
+#         stage = rank // per_stage_device_nums
+#         return stage
 
-        group = "-".join(map(str, self.cur_rank_dp))
-        create_group(group, list(self.cur_rank_dp))
+#     def _parse_stress_test_steps(self, stress_test_steps):
+#         ret = []
+#         for s in stress_test_steps:
+#             if isinstance(s, int) and s > 0:
+#                 ret.append(s)
+#             elif isinstance(s, str):
+#                 s = s.strip().split("-")
+#                 if len(s) == 2 and s[0].isdigit() and s[1].isdigit():
+#                     start, end = int(s[0]), int(s[1])
+#                     if start > 0 and end >= start:
+#                         ret.extend(list(range(start, end + 1)))
+#                         continue
+#                 raise ValueError(
+#                     f"Invalid stress test step {s}, should be range like '10-20'."
+#                 )
+#             else:
+#                 raise ValueError(
+#                     f"Invalid stress test step {s}, should be positive integer or range like '10-20'."
+#                 )
+#         return set(ret)
 
-        compare_data, test_steps = self._get_compare_data(cur_step)
+#     def on_train_begin(self, run_context):
+#         logger.info("Stress Test CB: on_train_begin")
+#         cb_params = run_context.original_args()
+#         self._last_step = cb_params.cur_step_num
 
-        if compare_data:
-            barrier(group=group)
-            gather_local_loss = all_gather_into_tensor(
-                compare_data["local_loss"].unsqueeze(0), group=group
-            )
-            gather_local_norm = all_gather_into_tensor(
-                compare_data["device_local_norm"].unsqueeze(0), group=group
-            )
-            loss_diff_step_and_rank = self._compare_data(
-                compare_data["local_loss"],
-                gather_local_loss,
-                self.cur_rank_dp,
-                get_rank(),
-                test_steps,
-            )
-            device_norm_diff_step_and_rank = self._compare_data(
-                compare_data["device_local_norm"],
-                gather_local_norm,
-                self.cur_rank_dp,
-                get_rank(),
-                test_steps,
-            )
-            if loss_diff_step_and_rank:
-                for step, rank, local_data, gather_data in loss_diff_step_and_rank:
-                    logger.error(
-                        f"Stress test failed at step {step}, loss mismatch with rank {rank}. local loss: {local_data}, rank {rank} loss: {gather_data}"
-                    )
-            if device_norm_diff_step_and_rank:
-                for step, rank, local_data, gather_data in device_norm_diff_step_and_rank:
-                    logger.error(
-                        f"Stress test failed at step {step}, device local norm mismatch with rank {rank}. local norm: {local_data}, rank {rank} norm: {gather_data}"
-                    )
-            if not loss_diff_step_and_rank and not device_norm_diff_step_and_rank:
-                logger.info(
-                    f"Stress test passed at step {test_steps}, all reduce results are consistent."
-                )
+#         mode = cb_params.get("mode")
+#         device_number = cb_params.get("device_number")
+#         parallel_mode = cb_params.get("parallel_mode")
+#         dataset_sink_mode = cb_params.get("dataset_sink_mode")
+#         train_network = cb_params.get("train_network")
 
-        self._last_step = cur_step
+#         self.pipeline_parallel = auto_parallel_context().get_pipeline_stages() != 1
+#         logger.info("Enable stress test.")
+#         enable_stress_test(list(self.stress_test_steps), self.data_parallel)
 
-    def _compare_data(self, local_data, gather_data, cur_rank_dp, cur_rank, test_steps):
-        rank_size = len(cur_rank_dp)
-        local_data = local_data.asnumpy()
-        gather_data = gather_data[0].asnumpy()
+#         for dirpath, dirs, files in os.walk(self.tensor_dump_path):
+#             for file in files:
+#                 if file == "statistic.csv":
+#                     try:
+#                         os.remove(os.path.join(dirpath, file))
+#                     except Exception as e:
+#                         logger.error(f"Error removing {file}: {e}")
 
-        ret = []
+#     def on_train_step_end(self, run_context):
+#         cb_params = run_context.original_args()
+#         self.cur_step = cb_params.cur_step_num
 
-        for i in range(rank_size):
-            if cur_rank == cur_rank_dp[i]:
-                continue
-            eq = local_data == gather_data[i]
-            eq = eq.all(axis=tuple(range(1, eq.ndim)))
-            for j, e in enumerate(eq):
-                if not e:
-                    ret.append((test_steps[j], cur_rank_dp[i], local_data[j], gather_data[i][j]))
-        return ret
+#         self.cur_rank_dp = self._get_dp_group(cb_params.train_network)
 
-    def _get_compare_data(self, cur_step):
-        if self._last_step == cur_step:
-            return None, []
+#         self._stress_test_check()
 
-        test_steps = [
-            s for s in self.stress_test_steps if self._last_step < s <= cur_step
-        ]
+#         self._last_step = self.cur_step
 
-        if not test_steps or not self.dump_data_parser:
-            return None, test_steps
+#     def _stress_test_check(self):
+#         dp_group = "-".join(map(str, self.cur_rank_dp))
+#         create_group(dp_group, list(self.cur_rank_dp))
+#         stage_group_list = self._get_stage_group()
+#         stage_group = "-".join(map(str, stage_group_list))
+#         create_group(stage_group, stage_group_list)
 
-        dump_data = self.dump_data_parser()
-        if not dump_data:
-            logger.error("No dump data found.")
-            return None, test_steps
+#         test_steps = [
+#             s for s in self.stress_test_steps if self._last_step < s <= self.cur_step
+#         ]
 
-        compare_loss = []
-        try:
-            compare_loss = [
-                dump_data.get("local_loss", [])[i - self._last_step - 1]
-                for i in test_steps
-            ]
-            if any(l is None for l in compare_loss):
-                logger.error("Incomplete local loss data found.")
-                compare_loss = []
-        except IndexError:
-            logger.error("Not enough local loss data found.")
-            return None, test_steps
+#         f_send_list, b_send_list, comm_list, _ = self.get_comm_ops()
+#         gather_comm = all_gather_into_tensor(
+#             Tensor(comm_list).unsqueeze(0), group=dp_group
+#         )
+#         barrier(group=dp_group)
+#         gather_comm = gather_comm[0].asnumpy()
+#         gather_comm = np.transpose(gather_comm, (1, 0, 2))
 
-        compare_norm = []
-        try:
-            compare_norm = [
-                dump_data.get("device_local_norm", [])[i - self._last_step - 1]
-                for i in test_steps
-            ]
-            if any(n is None for n in compare_norm):
-                logger.error("Incomplete device local norm data found.")
-                compare_norm = []
-        except IndexError:
-            logger.error("Not enough device local norm data found.")
-            return None, test_steps
+#         dump_data = self.get_local_computation(test_steps)
+#         if not dump_data:
+#             raise RuntimeError(
+#                 f"Stress Test: dump data not found at step {self.cur_step}."
+#             )
 
-        compare_loss, compare_norm = ms.Tensor(compare_loss), ms.Tensor(compare_norm)
-        return {
-            "local_loss": compare_loss,
-            "device_local_norm": compare_norm,
-        }, test_steps
+#         if self.pipeline_parallel:
+#             pp_group_list = self._get_pipeline_group()
+#             pp_group = "-".join(map(str, pp_group_list))
+#             create_group(pp_group, pp_group_list)
+
+#             gather_f_send = all_gather_into_tensor(
+#                 Tensor(f_send_list).unsqueeze(0), group=dp_group
+#             )
+#             barrier(group=dp_group)
+#             gather_f_send = gather_f_send[0].asnumpy()
+#             gather_f_send = np.transpose(gather_f_send, (1, 0, 2))
+
+#             gather_b_send = all_gather_into_tensor(
+#                 Tensor(b_send_list).unsqueeze(0), group=dp_group
+#             )
+#             barrier(group=dp_group)
+#             gather_b_send = gather_b_send[0].asnumpy()
+#             gather_b_send = np.transpose(gather_b_send, (1, 0, 2))
+
+#         loss_result = None
+#         if not self.pipeline_parallel or get_rank() == self._get_pipeline_group()[-1]:
+#             # [rank, step, value]
+#             gather_local_loss = all_gather_into_tensor(
+#                 dump_data["local_loss"].unsqueeze(0), group=dp_group
+#             )
+#             barrier(group=dp_group)
+#             loss_diff = self.compare_local_computation(
+#                 dump_data["local_loss"],
+#                 gather_local_loss,
+#                 self.cur_rank_dp,
+#                 get_rank(),
+#                 test_steps,
+#             )
+#             logger.info("Stress Test: evaluating loss difference.")
+#             loss_result = self.evaluate_local_comparision(loss_diff)
+
+#         gather_local_norm = all_gather_into_tensor(
+#             dump_data["device_local_norm"].unsqueeze(0), group=dp_group
+#         )
+#         barrier(group=dp_group)
+#         device_norm_diff = self.compare_local_computation(
+#             dump_data["device_local_norm"],
+#             gather_local_norm,
+#             self.cur_rank_dp,
+#             get_rank(),
+#             test_steps,
+#         )
+#         logger.info("Stress Test: evaluating device norm difference.")
+#         norm_result = self.evaluate_local_comparision(device_norm_diff)
+
+#         if loss_result:
+#             redundant_ranks = self._merge_redundant_ranks(loss_result, norm_result)
+#             is_failed = self._merge_is_failed(loss_result, norm_result)
+#         else:
+#             redundant_ranks = self._merge_redundant_ranks(norm_result)
+#             is_failed = self._merge_is_failed(norm_result)
+
+#         if not redundant_ranks:
+#             logger.error(
+#                 "No redundant ranks found, unable to determine problematic ranks."
+#             )
+#             return
+
+#         # XXX 现在ops只支持sink的最后一个step
+#         if self.cur_step not in redundant_ranks:
+#             return
+
+#         if self.pipeline_parallel:
+#             cur_stage = self._get_rank_stage()
+#             failed_stage = self.get_failed_stage(
+#                 cur_stage,
+#                 loss_result,
+#                 norm_result,
+#                 gather_f_send,
+#                 gather_b_send,
+#                 redundant_ranks,
+#                 pp_group,
+#             )
+#             for i in range(self.cur_step - self._last_step):
+#                 logger.info(
+#                     f"Stress Test: current stage {cur_stage}, failed stage {failed_stage[i]}."
+#                 )
+
+#             # if cur_stage == failed_stage:
+#             if len(self.cur_rank_dp) <= 2:
+#                 return
+#             self.compare_comm_ops(
+#                 gather_comm,
+#                 redundant_ranks,
+#                 is_failed,
+#                 stage_group,
+#                 mask=list(map(lambda x: x == cur_stage, failed_stage)),
+#             )
+
+#         else:
+#             if len(self.cur_rank_dp) <= 2:
+#                 return
+#             self.compare_comm_ops(gather_comm, redundant_ranks, is_failed, stage_group)
+
+#     def get_comm_ops(self):
+#         f_send_list, b_send_list, comm_list = [], [], []
+#         f_output_list = []
+#         if self.tensor_dump_path is None:
+#             ops_norm = get_norm_print()
+#             f_send_list, b_send_list, comm_list = self._parse_ops_norm(ops_norm)
+#             f_send_list = [f_send_list] * (self.cur_step - self._last_step)
+#             b_send_list = [b_send_list] * (self.cur_step - self._last_step)
+#             comm_list = [comm_list] * (self.cur_step - self._last_step)
+#             f_output_list = [-1] * (self.cur_step - self._last_step)
+#         else:
+#             for i in range(self.cur_step - self._last_step):
+#                 comm_ops = self._get_tensor_dump(
+#                     self.tensor_dump_path,
+#                     "net",
+#                     "1",
+#                     self._last_step + i,
+#                     get_rank(),
+#                 )
+#                 f_send, b_send, comm = self._parse_tensor_dump_ops(comm_ops)
+#                 if (
+#                     not self.pipeline_parallel
+#                     or get_rank() == self._get_pipeline_group()[-1]
+#                 ):
+#                     f_output = self._parse_tensor_dump_loss(comm_ops)
+#                     f_output_list.append(f_output)
+#                 else:
+#                     f_output_list.append(-1)
+#                 f_send_list.append(f_send)
+#                 b_send_list.append(b_send)
+#                 comm_list.append(comm)
+#         print(f_output_list)
+#         return f_send_list, b_send_list, comm_list, f_output_list
+
+#     def _get_tensor_dump(self, dump_path, net_name, graph_id, iter_id, rank_id):
+#         path = os.path.join(
+#             dump_path,
+#             f"rank_{rank_id}",
+#             net_name,
+#             str(graph_id),
+#             str(iter_id),
+#             "statistic.csv",
+#         )
+#         if not os.path.exists(path):
+#             raise FileNotFoundError(f"Stress Test: tensor dump file {path} not found.")
+#         with open(path, "r") as f:
+#             lines = f.readlines()
+#         if len(lines) < 2:
+#             raise ValueError(f"Stress Test: tensor dump file {path} is empty.")
+
+#         def _parse_to_value(value):
+#             return float(value)
+
+#         def _parse_md5(value):
+#             return sum([ord(c) for c in value]) / (
+#                 reduce(lambda x, y: x ^ y, [ord(c) for c in value]) + 1e-6
+#             )
+#             return sum([ord(c) for c in value])
+
+#         header = lines[0].strip().split(",")
+#         value_col_idx = -1
+#         if "MD5" in header:
+#             value_col_idx = header.index("MD5")
+#             parser = _parse_md5
+#         elif "L2Norm Value" in header:
+#             value_col_idx = header.index("L2Norm Value")
+#             parser = _parse_to_value
+#         else:
+#             raise NotImplementedError(
+#                 f"Stress Test: tensor dump file {path} has no MD5 or L2Norm column."
+#             )
+#         type_idx = header.index("Op Type")
+#         name_idx = header.index("Op Name")
+#         io_idx = header.index("IO")
+#         tensor_dump = []
+#         for line in lines[1:]:
+#             # parts = line.strip().split(",")
+#             parts = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', line.strip())
+#             # if parts[io_idx] != "input":
+#             tensor_type = parts[type_idx].strip()
+#             tensor_name = parts[name_idx].strip()
+#             tensor_io = parts[io_idx].strip()
+#             tensor_value = parts[value_col_idx].strip()
+
+#             if not tensor_value:
+#                 raise ValueError(
+#                     f"Stress Test: tensor {tensor_name} in file {path} has no value."
+#                 )
+#             tensor_dump.append(
+#                 (tensor_type, tensor_name, tensor_io, parser(tensor_value))
+#             )
+#         return tensor_dump
+
+#     def _parse_tensor_dump_loss(self, comm_ops):
+#         if self.pipeline_parallel:
+#             if get_rank() != self._get_pipeline_group()[-1]:
+#                 return -1
+#             comm_ops = list(
+#                 filter(
+#                     lambda x: (x[0] == "Send" and x[1][:9] == "Gradients")
+#                     or (x[0] != "Send" and x[1][:7] == "Default"),
+#                     comm_ops,
+#                 )
+#             )
+#             send_idx = [i for i, op in enumerate(comm_ops) if op[0] == "Send"]
+#             f_outputs = []
+#             for i in send_idx:
+#                 if i - 1 < 0 or i - 1 > len(comm_ops) - 1:
+#                     continue
+#                 if comm_ops[i - 1][0] != "Default":
+#                     continue
+#                 f_outputs.append(comm_ops[i - 1][3])
+#             if f_outputs:
+#                 return sum(f_outputs)
+#             return -1
+#         else:
+#             comm_ops = list(
+#                 filter(
+#                     lambda x: x[1][:9] == "Gradients" or x[1][:7] == "Default", comm_ops
+#                 )
+#             )
+#             grad_idx = -1
+#             for i, op in enumerate(comm_ops):
+#                 print(op[1][:9])
+#                 if op[1][:9] == "Gradients":
+#                     grad_idx = i
+#                     break
+#             if grad_idx == -1:
+#                 return -1
+#             if grad_idx - 1 < 0 or grad_idx - 1 > len(comm_ops) - 1:
+#                 return -1
+#             if comm_ops[grad_idx - 1][1][:7] != "Default":
+#                 return -1
+#             return comm_ops[grad_idx - 1][3]
+
+#     def _parse_tensor_dump_ops(self, comm_ops):
+#         f_send_list = []
+#         b_send_list = []
+#         comm_list = []
+
+#         for op_type, name, io, value in comm_ops:
+#             if io != "input":
+#                 continue
+#             if op_type == "Send":
+#                 head = name.split("/")[0]
+#                 if head == "Gradients":
+#                     b_send_list.append(value)
+#                 else:
+#                     f_send_list.append(value)
+#             else:
+#                 comm_list.append(value)
+#         return f_send_list, b_send_list, comm_list
+
+#     def get_failed_stage(
+#         self,
+#         cur_stage,
+#         loss_result,
+#         norm_result,
+#         gather_f_send,
+#         gather_b_send,
+#         redundant_ranks,
+#         pp_group,
+#     ):
+#         cur_rank_idx = self.cur_rank_dp.index(get_rank())
+#         # 新建一个len(self.cur_rank_dp)大小的矩阵，
+#         # 如果idx在redundant_ranks就标注1，否则0，
+#         # 虽然在pp gather，他们代表的rank不一致，但是pp是一致的，
+
+#         if loss_result:
+#             cur_loss_failed = [
+#                 1 if loss_result[i + 1]["is_failed"] else 0
+#                 for i in range(self._last_step, self.cur_step)
+#             ]
+#         else:
+#             cur_loss_failed = [0] * (self.cur_step - self._last_step)
+
+#         gather_loss_failed = all_gather_into_tensor(
+#             Tensor(cur_loss_failed).unsqueeze(0), group=pp_group
+#         )
+#         barrier(group=pp_group)
+#         gather_loss_failed = gather_loss_failed[0].asnumpy()
+#         loss_failed = gather_loss_failed[-1] > 0
+
+#         redundant_flag = [
+#             [0] * len(self.cur_rank_dp) for _ in range(self.cur_step - self._last_step)
+#         ]
+#         for i in range(self.cur_step - self._last_step):
+#             for r in redundant_ranks[self._last_step + i + 1]:
+#                 idx = self.cur_rank_dp.index(r)
+#                 redundant_flag[i][idx] = 1
+#         gather_redundant_flag = all_gather_into_tensor(
+#             Tensor(redundant_flag).unsqueeze(0), group=pp_group
+#         )
+#         barrier(group=pp_group)
+#         gather_redundant_flag = gather_redundant_flag[0].asnumpy()
+#         gather_redundant_flag = np.transpose(gather_redundant_flag, (1, 0, 2))
+#         redundant_flag = np.all(gather_redundant_flag, axis=1)
+#         cmp_rank_idxs = np.argmax(redundant_flag, axis=1)
+
+#         for i in range(self.cur_step - self._last_step):
+#             if len(self.cur_rank_dp) > 2 and redundant_flag[i][cmp_rank_idxs[i]] == 0:
+#                 # add step idx
+#                 raise RuntimeError(
+#                     f"No redundant ranks found in pipeline group in step {self._last_step + i + 1}, unable to determine problematic ranks."
+#                 )
+
+#         # logger.info(
+#         #     f"Stress Test: Compare send ops with rank {self.cur_rank_dp[cmp_rank_idx]}."
+#         # )
+
+#         if len(self.cur_rank_dp) <= 2:
+#             cmp_rank_idxs = (
+#                 [0] * (self.cur_step - self._last_step)
+#                 if cur_rank_idx
+#                 else [1] * (self.cur_step - self._last_step)
+#             )
+
+#         failed_stage = [-1] * (self.cur_step - self._last_step)
+
+#         f_failed_stage = list(map(lambda x: cur_stage if x else -1, cur_loss_failed))
+#         for i in range(self.cur_step - self._last_step):
+#             if loss_failed[i]:
+#                 min_idx_rank, _ = self._find_first_failed_rank(
+#                     gather_f_send[i],
+#                     cur_rank_idx,
+#                     cmp_rank_idxs[i],
+#                     pp_group,
+#                     flip=False,
+#                 )
+#                 if min_idx_rank == get_rank():
+#                     f_failed_stage[i] = cur_stage
+
+#         b_failed_stage = list(
+#             map(
+#                 lambda x: 0 if x and cur_stage == 0 else -1,
+#                 [
+#                     norm_result[i + 1]["is_failed"]
+#                     for i in range(self._last_step, self.cur_step)
+#                 ],
+#             )
+#         )
+#         for i in range(self.cur_step - self._last_step):
+#             if not norm_result[self.cur_step]["is_failed"]:
+#                 cmp_rank_idxs[i] = -1
+#             min_idx_rank, _ = self._find_first_failed_rank(
+#                 gather_b_send[i],
+#                 cur_rank_idx,
+#                 cmp_rank_idxs[i],
+#                 pp_group,
+#                 flip=True,
+#             )
+#             if min_idx_rank == get_rank():
+#                 b_failed_stage[i] = cur_stage
+
+#         gather_failed_stage = all_gather_into_tensor(
+#             Tensor([f_failed_stage, b_failed_stage]).unsqueeze(0)
+#         )
+#         barrier()
+#         # [rank, step, 2]
+#         gather_failed_stage = gather_failed_stage[0].asnumpy().astype(np.float32)
+#         # transpose to [step, rank, 2]
+#         gather_failed_stage = np.transpose(gather_failed_stage, (2, 0, 1))
+#         gather_failed_stage[:, :, 0] = np.where(
+#             gather_failed_stage[:, :, 0] < 0, np.inf, gather_failed_stage[:, :, 0]
+#         )
+#         f_failed_stage = np.min(gather_failed_stage[:, :, 0], axis=1)
+#         b_failed_stage = np.max(gather_failed_stage[:, :, 1], axis=1)
+#         for i in range(self.cur_step - self._last_step):
+#             if f_failed_stage[i] != np.inf:
+#                 failed_stage[i] = int(f_failed_stage[i])
+#                 logger.info(
+#                     f"Stress Test: found failed stage by forward send ops at step {self._last_step + i + 1}: {failed_stage[i]}."
+#                 )
+#             elif b_failed_stage[i] != -1:
+#                 failed_stage[i] = int(b_failed_stage[i])
+#                 logger.info(
+#                     f"Stress Test: found failed stage by backward send ops at step {self._last_step + i + 1}: {failed_stage[i]}."
+#                 )
+#             else:
+#                 failed_stage[i] = -1
+
+#         return failed_stage
+
+#     def _parse_ops_norm(self, ops_norm):
+#         f_send_list = []
+#         b_send_list = []
+#         comm_list = []
+
+#         ops_norm = sorted(ops_norm.items(), key=lambda x: int(x[0].split("|")[0]))
+
+#         send_pattern = re.compile(r"^[\w/-]+/Send-\w*$")
+#         for k, v in ops_norm:
+#             ops_name = k.split("|")[1]
+#             ops_group_str = k.split("|")[2]
+#             if ops_group_str == "no_value":
+#                 raise ValueError(f"Invalid ops group in ops norm {k}.")
+#             # ops_group = list(map(int, ops_group_str.split(",")))
+#             if send_pattern.match(ops_name):
+#                 head = ops_name.split("/")[0]
+#                 if head == "Gradients":
+#                     b_send_list.append(v)
+#                 else:
+#                     f_send_list.append(v)
+#             else:
+#                 comm_list.append(v)
+#         return f_send_list, b_send_list, comm_list
+
+#     def _find_first_failed_rank(
+#         self, gather_ops, cur_rank_idx, cmp_rank_idx, group, flip=False
+#     ):
+#         ranks = list(map(int, group.split("-")))
+#         min_ops_idx = -1
+
+#         if cur_rank_idx < 0 or cmp_rank_idx < 0:
+#             gather_min_diff = all_gather_into_tensor(
+#                 Tensor([-1], ms.int32), group=group
+#             )
+#             barrier(group=group)
+#         else:
+#             ops_diff = gather_ops[cur_rank_idx] == gather_ops[cmp_rank_idx]
+#             if not np.all(ops_diff):
+#                 min_ops_idx = np.argmax(~ops_diff)
+#             else:
+#                 logger.warning("All operator norms are equal, which is unexpected.")
+#             gather_min_diff = all_gather_into_tensor(
+#                 Tensor([min_ops_idx], ms.int32), group=group
+#             )
+#             barrier(group=group)
+#         gather_min_diff = gather_min_diff[0].asnumpy().astype(np.float32)
+#         gather_min_diff[gather_min_diff < 0] = np.inf
+#         gather_min_diff = np.flip(gather_min_diff, axis=0) if flip else gather_min_diff
+#         ranks = ranks[::-1] if flip else ranks
+#         min_rank_idx = np.argmin(gather_min_diff)
+#         count = np.sum(gather_min_diff == min_ops_idx)
+#         if gather_min_diff[min_rank_idx] == np.inf:
+#             return -1, count
+#         ret = ranks[min_rank_idx]
+#         return ret, count
+
+#     def _merge_is_failed(self, *result):
+#         is_failed = defaultdict(list)
+#         ret = {}
+#         for res in result:
+#             for step, data in res.items():
+#                 is_failed[step].append(data["is_failed"])
+#         for k, v in is_failed.items():
+#             ret[k] = any(v)
+#         return ret
+
+#     def _merge_redundant_ranks(self, *result):
+#         redundant_ranks = defaultdict(list)
+#         ret = {}
+#         for res in result:
+#             for step, data in res.items():
+#                 redundant_ranks[step].append(data["redundant_ranks"])
+#         for k, v in redundant_ranks.items():
+#             intersect = list(reduce(lambda x, y: set(x) & set(y), v))
+#             ret[k] = intersect
+#         return ret
+
+#     def compare_comm_ops(
+#         self, gather_comm_ops, redundant_ranks, is_failed, stage_group, mask=None
+#     ):
+#         # # XXX 现在ops只支持sink的最后一个step
+#         # if self.cur_step not in redundant_ranks:
+#         #     return
+
+#         for i in range(self._last_step, self.cur_step):
+#             if mask is not None and not mask[i - self._last_step]:
+#                 continue
+#             cur_rank_idx = -1
+#             cmp_rank_idx = -1
+
+#             if is_failed[i + 1]:
+#                 compare_rank = redundant_ranks[i + 1][0]
+#                 cur_rank_idx = self.cur_rank_dp.index(get_rank())
+#                 cmp_rank_idx = self.cur_rank_dp.index(compare_rank)
+
+#             min_idx_rank, count = self._find_first_failed_rank(
+#                 gather_comm_ops[i - self._last_step],
+#                 cur_rank_idx,
+#                 cmp_rank_idx,
+#                 stage_group,
+#             )
+
+#             if cur_rank_idx >= 0 and cmp_rank_idx >= 0:
+#                 # cause it's global gather, so current rank value is the index of gather result
+#                 if min_idx_rank == get_rank():
+#                     logger.error(f"Stress Test Step {i + 1}: Stress Test FAILED.")
+#                     if count > 1:
+#                         logger.warning(
+#                             f"Stress Test Step {i + 1}: Unexpected behavior detected. Multiple ranks have the same minimum differing operator norm."
+#                         )
+#                 else:
+#                     logger.info(
+#                         f"Stress Test Step {i + 1}: This rank is not the easiest to fail rank. Found earlier rank idx {min_idx_rank}."
+#                     )
+#             else:
+#                 logger.info(
+#                     f"Stress Test Step {i + 1}: No discrepancies found in communication operator norms."
+#                 )
+
+#     def get_local_computation(self, test_steps):
+#         if self._last_step == self.cur_step:
+#             return None
+
+#         if not test_steps or not self.dump_data_parser:
+#             return None
+
+#         dump_data = self.dump_data_parser()
+#         if not dump_data:
+#             logger.error("No dump data found.")
+#             return None
+
+#         dump_loss = None
+#         try:
+#             dump_loss = [
+#                 dump_data.get("local_loss", [])[i - self._last_step - 1]
+#                 for i in test_steps
+#             ]
+#             if any(l is None for l in dump_loss):
+#                 logger.warning("Incomplete local loss data found.")
+#                 dump_loss = None
+#         except IndexError:
+#             logger.warning("Not enough local loss data found.")
+#             dump_loss = None
+
+#         dump_norm = None
+#         try:
+#             dump_norm = [
+#                 dump_data.get("device_local_norm", [])[i - self._last_step - 1]
+#                 for i in test_steps
+#             ]
+#             if any(n is None for n in dump_norm):
+#                 logger.warning("Incomplete device local norm data found.")
+#                 dump_norm = None
+#         except IndexError:
+#             logger.warning("Not enough device local norm data found.")
+#             dump_norm = None
+
+#         if dump_loss:
+#             dump_loss = ms.Tensor(dump_loss)
+#         if dump_norm:
+#             dump_norm = ms.Tensor(dump_norm)
+
+#         return {
+#             "local_loss": dump_loss,
+#             "device_local_norm": dump_norm,
+#         }
+
+#     def compare_local_computation(
+#         self, local_data, gather_data, cur_rank_dp, cur_rank, test_steps
+#     ):
+#         rank_size = len(cur_rank_dp)
+#         local_data = local_data.asnumpy()
+#         gather_data = gather_data[0].asnumpy()
+
+#         ret = defaultdict(lambda: {"mismatch": [], "match": []})
+
+#         # rank
+#         for i in range(rank_size):
+#             if cur_rank == cur_rank_dp[i]:
+#                 continue
+#             eq = local_data == gather_data[i]
+#             eq = eq.all(axis=tuple(range(1, eq.ndim)))
+#             # step
+#             for j, e in enumerate(eq):
+#                 if not e:
+#                     ret[test_steps[j]]["mismatch"].append(
+#                         {
+#                             "local_data": local_data[j],
+#                             "redundant_data": gather_data[i][j],
+#                             "redundant_rank": cur_rank_dp[i],
+#                         }
+#                     )
+#                 else:
+#                     ret[test_steps[j]]["match"].append(
+#                         {
+#                             "local_data": local_data[j],
+#                             "redundant_data": gather_data[i][j],
+#                             "redundant_rank": cur_rank_dp[i],
+#                         }
+#                     )
+#         return ret
+
+#     def evaluate_local_comparision(self, diff_data):
+#         def _get_redundant_ranks(data):
+#             data_rank_map = defaultdict(list)
+
+#             for item in data["mismatch"]:
+#                 k = item["redundant_data"]
+#                 if isinstance(k, np.ndarray):
+#                     k = k.tobytes()
+#                 data_rank_map[k].append(item["redundant_rank"])
+#             for item in data["match"]:
+#                 k = item["redundant_data"]
+#                 if isinstance(k, np.ndarray):
+#                     k = k.tobytes()
+#                 data_rank_map[k].append(item["redundant_rank"])
+#             ranks_group = sorted(data_rank_map.values(), key=lambda x: len(x))
+#             if not ranks_group:
+#                 return []
+#             if len(ranks_group) == 1:
+#                 return ranks_group[0]
+#             else:
+#                 if (
+#                     len(ranks_group[-1]) > len(ranks_group[-2])
+#                     and len(ranks_group[-1]) > 1
+#                 ):
+#                     return ranks_group[-1]
+#                 else:
+#                     return []
+
+#         ret = defaultdict(dict)
+#         for step, data in diff_data.items():
+#             mismatch_num = len(data["mismatch"])
+#             match_num = len(data["match"])
+#             if mismatch_num == 0:
+#                 logger.info(
+#                     f"Stress Test Step {step}: Total matched samples: {match_num} / {match_num + mismatch_num}. This rank passed stress test."
+#                 )
+#                 ret[step]["redundant_ranks"] = [
+#                     item["redundant_rank"] for item in data["match"]
+#                 ]
+#                 ret[step]["mismatch_ranks"] = []
+#                 ret[step]["match_ranks"] = [
+#                     item["redundant_rank"] for item in data["match"]
+#                 ]
+#                 ret[step]["is_failed"] = False
+#             # TODO 这里逻辑还能简化一下
+#             elif mismatch_num == 1:
+#                 if len(self.cur_rank_dp) <= 2:
+#                     logger.warning(
+#                         f"Stress Test Step {step}: Unable to determine the problematic rank when data parallel size is less than or equal to 2."
+#                     )
+#                 else:
+#                     logger.info(
+#                         f"Stress Test Step {step}: Total matched samples: {match_num} / {match_num + mismatch_num}. This rank passed stress test."
+#                     )
+#                 ret[step]["redundant_ranks"] = [
+#                     item["redundant_rank"] for item in data["match"]
+#                 ]
+#                 ret[step]["mismatch_ranks"] = []
+#                 ret[step]["match_ranks"] = [
+#                     item["redundant_rank"] for item in data["match"]
+#                 ]
+#                 ret[step]["is_failed"] = False
+#                 if len(self.cur_rank_dp) <= 2:
+#                     ret[step]["is_failed"] = True
+#             else:
+#                 logger.warning(
+#                     f"Stress Test Step {step}: Total matched samples: {match_num} / {match_num + mismatch_num}. This rank may have issues."
+#                 )
+#                 # 打印该rank的数据，以及所有不匹配rank的id：数据
+#                 warning_str = f"Local data: {data['mismatch'][0]['local_data']}, Mismatched data samples: {{"
+#                 for item in data["mismatch"]:
+#                     warning_str += (
+#                         f"rank {item['redundant_rank']}: {item['redundant_data']}, "
+#                     )
+#                 warning_str = warning_str[:-2] + "}"
+#                 logger.warning(warning_str)
+#                 redundant_ranks = _get_redundant_ranks(data)
+#                 if not redundant_ranks:
+#                     logger.error(
+#                         f"Stress Test Step {step}: Unexpected behavior detected. Unable to determine the problematic ranks."
+#                     )
+#                     raise RuntimeError(
+#                         "Stress Test Failed: Unable to determine the problematic ranks."
+#                     )
+#                 logger.info(
+#                     f"Stress Test Step {step}: Redundant ranks found: {redundant_ranks}"
+#                 )
+#                 ret[step]["redundant_ranks"] = redundant_ranks
+#                 ret[step]["mismatch_ranks"] = [
+#                     item["redundant_rank"] for item in data["mismatch"]
+#                 ]
+#                 ret[step]["match_ranks"] = [
+#                     item["redundant_rank"] for item in data["match"]
+#                 ]
+#                 ret[step]["is_failed"] = (
+#                     True if redundant_ranks[0] in ret[step]["mismatch_ranks"] else False
+#                 )
+#         return dict(ret)
